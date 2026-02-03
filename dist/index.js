@@ -32020,7 +32020,7 @@ async function main() {
   const maxChars = clampInt(core.getInput("max_chars"), 120000, 10000, 500000);
   const failOnIssues = (core.getInput("fail_on_issues") || "false").toLowerCase() === "true";
   const extra = core.getInput("extra_instructions") || "";
-  const commentMarker = core.getInput("comment_marker") || "AI_PR_REVIEW";
+  const commentMarker = core.getInput("comment_marker") || "AI_PR_REVIEW_ACTION";
 
   const ctx = github.context;
   if (!ctx.payload.pull_request) {

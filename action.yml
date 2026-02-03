@@ -34,7 +34,7 @@ inputs:
   comment_marker:
     description: "Unique marker for sticky comments (use different values for multi-job setups)"
     required: false
-    default: "AI_PR_REVIEW"
+    default: "AI_PR_REVIEW_ACTION"
 runs:
   using: "node20"
   main: "dist/index.js"
