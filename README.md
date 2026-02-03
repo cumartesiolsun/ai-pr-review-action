@@ -1,2 +1,80 @@
-# ai-pr-review-action
-AI PR Review (LM Studio / OpenAI)
+# AI PR Review Action
+
+A GitHub Action that automatically reviews pull requests using any OpenAI-compatible API (LM Studio, OpenAI, Ollama, etc.).
+
+## Features
+
+- Works with any OpenAI-compatible endpoint (LM Studio, OpenAI, Azure OpenAI, Ollama, etc.)
+- Configurable review language (default: Turkish)
+- Sticky comments - updates existing review instead of creating duplicates
+- Configurable file and diff size limits
+- Optional workflow failure on critical issues detected
+- Custom reviewer instructions support
+
+## Usage
+
+```yaml
+name: AI PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: AI Code Review
+        uses: cumartesiolsun/ai-pr-review-action@main
+        with:
+          base_url: "https://api.openai.com/v1"
+          api_key: ${{ secrets.OPENAI_API_KEY }}
+          model: "gpt-4o"
+          language: "English"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+### Using with LM Studio (Local)
+
+```yaml
+- name: AI Code Review
+  uses: cumartesiolsun/ai-pr-review-action@main
+  with:
+    base_url: "http://localhost:1234/v1"
+    api_key: "lm-studio"
+    model: "qwen2.5-coder-32b-instruct"
+    language: "Turkish"
+  env:
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+## Inputs
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `base_url` | Yes | - | OpenAI-compatible base URL |
+| `api_key` | Yes | - | API key/token |
+| `model` | Yes | - | Model name to use |
+| `language` | No | `Turkish` | Review output language |
+| `max_files` | No | `25` | Maximum files to review (1-200) |
+| `max_chars` | No | `120000` | Maximum diff characters (10k-500k) |
+| `fail_on_issues` | No | `false` | Fail workflow if critical issues found |
+| `extra_instructions` | No | - | Additional reviewer instructions |
+
+## How It Works
+
+1. Triggered on pull request events (open, sync, reopen)
+2. Fetches PR diff and file list from GitHub API
+3. Builds a review prompt with file changes and diff content
+4. Sends to configured OpenAI-compatible endpoint
+5. Posts review as a PR comment (updates existing if re-run)
+6. Optionally fails workflow if critical issues detected
+
+## Environment Variables
+
+- `GITHUB_TOKEN` - Required for GitHub API access (automatically provided by GitHub Actions)
+
+## License
+
+MIT

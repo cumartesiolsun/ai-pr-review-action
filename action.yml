@@ -1,0 +1,36 @@
+name: "AI PR Review (LM Studio / OpenAI)"
+description: "Reviews PR diff using OpenAI-compatible Chat Completions (works with LM Studio and OpenAI cloud)."
+author: "cumartesiolsun"
+inputs:
+  base_url:
+    description: "OpenAI-compatible base URL (e.g. https://api.openai.com/v1 or http://host:11055/v1)"
+    required: true
+  api_key:
+    description: "API key/token"
+    required: true
+  model:
+    description: "Model name (e.g. openai/gpt-oss-20b or qwen3-coder)"
+    required: true
+  language:
+    description: "Review language"
+    required: false
+    default: "Turkish"
+  max_files:
+    description: "Max files to review (avoid huge PRs)"
+    required: false
+    default: "25"
+  max_chars:
+    description: "Max diff chars total"
+    required: false
+    default: "120000"
+  fail_on_issues:
+    description: "If true, fail workflow when critical issues found"
+    required: false
+    default: "false"
+  extra_instructions:
+    description: "Extra reviewer instructions"
+    required: false
+    default: ""
+runs:
+  using: "node20"
+  main: "src/index.js"
