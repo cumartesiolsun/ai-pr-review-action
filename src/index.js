@@ -1,6 +1,12 @@
 const core = require("@actions/core");
 const github = require("@actions/github");
 
+// Configuration constants
+const DEFAULT_TIMEOUT_MS = 120000; // 2 minutes
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 2000;
+const CHARS_PER_TOKEN_ESTIMATE = 4; // Rough estimate: ~4 chars per token
+
 function clampInt(val, def, min, max) {
   const n = Number.parseInt(val ?? "", 10);
   if (Number.isNaN(n)) return def;
@@ -13,19 +19,113 @@ function cut(str, max) {
   return str.slice(0, max) + "\n...[truncated]\n";
 }
 
-async function fetchJson(url, options) {
-  const res = await fetch(url, options);
-  const text = await res.text();
-  let json = null;
-  try { json = JSON.parse(text); } catch (_) {}
-  if (!res.ok) {
-    const msg = json?.error?.message || json?.error || text || `HTTP ${res.status}`;
-    const err = new Error(msg);
-    err.status = res.status;
-    err.body = text;
+function estimateTokens(text) {
+  // Rough estimation: ~4 characters per token for English/code
+  return Math.ceil((text?.length || 0) / CHARS_PER_TOKEN_ESTIMATE);
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isRetryableError(status) {
+  // Retry on rate limit (429), server errors (5xx), and network issues
+  return status === 429 || (status >= 500 && status < 600);
+}
+
+function parseResponse(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function createHttpError(json, text, status) {
+  const msg = json?.error?.message || json?.error || text || `HTTP ${status}`;
+  const err = new Error(msg);
+  err.status = status;
+  err.body = text;
+  return err;
+}
+
+function createTimeoutError(timeoutMs) {
+  const err = new Error(`Request timed out after ${timeoutMs}ms`);
+  err.status = 408;
+  return err;
+}
+
+function calculateBackoff(attempt) {
+  return RETRY_DELAY_MS * Math.pow(2, attempt - 1);
+}
+
+async function executeRequest(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(timeoutId);
+    const text = await res.text();
+    const json = parseResponse(text);
+    return { res, text, json };
+  } catch (err) {
+    clearTimeout(timeoutId);
     throw err;
   }
-  return json;
+}
+
+async function handleRetry(message, attempt, maxRetries, delayMs = null) {
+  if (delayMs) {
+    core.warning(`${message}, retrying in ${delayMs}ms... (attempt ${attempt}/${maxRetries})`);
+    await sleep(delayMs);
+  } else {
+    core.warning(`${message}, retrying... (attempt ${attempt}/${maxRetries})`);
+  }
+}
+
+async function handleHttpError(err, res, attempt, maxRetries) {
+  const shouldRetry = isRetryableError(res.status) && attempt < maxRetries;
+  if (!shouldRetry) throw err;
+  await handleRetry(`API error (${res.status})`, attempt, maxRetries, calculateBackoff(attempt));
+  return err;
+}
+
+async function handleCatchError(err, attempt, maxRetries, timeoutMs) {
+  const isTimeout = err.name === "AbortError";
+  const canRetry = attempt < maxRetries;
+
+  if (isTimeout) {
+    const timeoutErr = createTimeoutError(timeoutMs);
+    if (!canRetry) throw timeoutErr;
+    await handleRetry("Request timeout", attempt, maxRetries);
+    return timeoutErr;
+  }
+
+  const isNetworkError = !err.status;
+  if (isNetworkError && canRetry) {
+    await handleRetry(`Network error: ${err.message}`, attempt, maxRetries, calculateBackoff(attempt));
+    return err;
+  }
+
+  throw err;
+}
+
+async function fetchJson(url, options, { timeoutMs = DEFAULT_TIMEOUT_MS, maxRetries = MAX_RETRIES } = {}) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const { res, text, json } = await executeRequest(url, options, timeoutMs);
+      if (res.ok) return json;
+
+      const err = createHttpError(json, text, res.status);
+      lastError = await handleHttpError(err, res, attempt, maxRetries);
+    } catch (err) {
+      lastError = await handleCatchError(err, attempt, maxRetries, timeoutMs);
+    }
+  }
+  throw lastError;
 }
 
 async function createOrUpdateComment(octokit, repo, issue_number, body) {
@@ -128,7 +228,20 @@ async function main() {
   let diffText = diffParts.join("\n");
   diffText = cut(diffText, maxChars);
 
-  // 3) Call OpenAI-compatible chat/completions
+  // 3) Estimate tokens and warn if potentially exceeding limits
+  const prompt = buildPrompt({ language, extra_instructions: extra, filesSummary, diffText });
+  const estimatedInputTokens = estimateTokens(prompt);
+  const TOKEN_WARNING_THRESHOLD = 25000; // Warn if input exceeds ~25k tokens
+
+  if (estimatedInputTokens > TOKEN_WARNING_THRESHOLD) {
+    core.warning(
+      `Large prompt detected: ~${estimatedInputTokens} tokens estimated. ` +
+      `This may exceed model context limits. Consider reducing max_files or max_chars.`
+    );
+  }
+  core.info(`Estimated input tokens: ~${estimatedInputTokens}`);
+
+  // 4) Call OpenAI-compatible chat/completions
   const url = `${baseUrlInput}/chat/completions`;
 
   // Use response_format=text for LM Studio compatibility.
@@ -138,7 +251,7 @@ async function main() {
     temperature: 0.2,
     messages: [
       { role: "system", content: "You are a careful, strict code reviewer." },
-      { role: "user", content: buildPrompt({ language, extra_instructions: extra, filesSummary, diffText }) }
+      { role: "user", content: prompt }
     ],
     response_format: { type: "text" }
   };
@@ -159,7 +272,7 @@ async function main() {
 
   if (!content) throw new Error("Model returned empty response");
 
-  // 4) Post comment
+  // 5) Post comment
   const header = [
     `## 🤖 AI PR Review`,
     `- Model: \`${model}\``,
@@ -169,7 +282,7 @@ async function main() {
 
   await createOrUpdateComment(octokit, repo, pr.number, header + content);
 
-  // 5) Optional fail on critical issues (simple heuristic)
+  // 6) Optional fail on critical issues (simple heuristic)
   if (failOnIssues) {
     const lowered = content.toLowerCase();
     const hasCritical = ["kritik", "critical", "security", "rce", "sql injection", "auth bypass"].some(k => lowered.includes(k));
