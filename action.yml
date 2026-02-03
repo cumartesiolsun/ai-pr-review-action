@@ -35,6 +35,10 @@ inputs:
     description: "Unique marker for sticky comments (use different values for multi-job setups)"
     required: false
     default: "AI_PR_REVIEW_ACTION"
+  review_mode:
+    description: "Review mode: 'summary' for single PR comment, 'inline' for per-file inline comments"
+    required: false
+    default: "summary"
 runs:
   using: "node20"
   main: "dist/index.js"

@@ -31838,10 +31838,15 @@ const core = __nccwpck_require__(7484);
 const github = __nccwpck_require__(3228);
 
 // Configuration constants
-const DEFAULT_TIMEOUT_MS = 120000; // 2 minutes
+const DEFAULT_TIMEOUT_MS = 60000; // 60 seconds for LLM calls
 const MAX_RETRIES = 3;
-const RETRY_DELAY_MS = 2000;
-const CHARS_PER_TOKEN_ESTIMATE = 4; // Rough estimate: ~4 chars per token
+const RETRY_DELAY_MS = 1000;
+const CHUNK_SIZE = 12000; // ~12k chars per chunk
+const CHARS_PER_TOKEN_ESTIMATE = 4;
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
 
 function clampInt(val, def, min, max) {
   const n = Number.parseInt(val ?? "", 10);
@@ -31849,25 +31854,59 @@ function clampInt(val, def, min, max) {
   return Math.max(min, Math.min(max, n));
 }
 
-function cut(str, max) {
-  if (!str) return "";
-  if (str.length <= max) return str;
-  return str.slice(0, max) + "\n...[truncated]\n";
-}
-
-function estimateTokens(text) {
-  // Rough estimation: ~4 characters per token for English/code
-  return Math.ceil((text?.length || 0) / CHARS_PER_TOKEN_ESTIMATE);
-}
-
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function isRetryableError(status) {
-  // Retry on rate limit (429), server errors (5xx), and network issues
-  return status === 429 || (status >= 500 && status < 600);
+function estimateTokens(text) {
+  return Math.ceil((text?.length || 0) / CHARS_PER_TOKEN_ESTIMATE);
 }
+
+function chunkString(str, size = CHUNK_SIZE) {
+  if (!str || str.length <= size) return [str];
+  const chunks = [];
+  for (let i = 0; i < str.length; i += size) {
+    chunks.push(str.slice(i, i + size));
+  }
+  return chunks;
+}
+
+function isEmptyReview(content) {
+  if (!content || content.trim().length < 20) return true;
+  const lower = content.toLowerCase();
+  const emptyPhrases = [
+    "no issues",
+    "looks good",
+    "lgtm",
+    "no problems",
+    "no concerns",
+    "sorun yok",
+    "problem yok",
+    "iyi görünüyor",
+    "nothing to report",
+    "no suggestions"
+  ];
+  return emptyPhrases.some(phrase => lower.includes(phrase) && content.trim().length < 100);
+}
+
+function getFirstHunkPosition(patch) {
+  // Get position of first actual change line in the diff
+  // Position is 1-indexed from the start of the diff
+  if (!patch) return 1;
+  const lines = patch.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith("+") || lines[i].startsWith("-")) {
+      if (!lines[i].startsWith("+++") && !lines[i].startsWith("---")) {
+        return i + 1;
+      }
+    }
+  }
+  return 1;
+}
+
+// ============================================================================
+// HTTP Client with Retry
+// ============================================================================
 
 function parseResponse(text) {
   try {
@@ -31885,87 +31924,201 @@ function createHttpError(json, text, status) {
   return err;
 }
 
-function createTimeoutError(timeoutMs) {
-  const err = new Error(`Request timed out after ${timeoutMs}ms`);
-  err.status = 408;
-  return err;
+function isRetryableError(status) {
+  return status === 429 || (status >= 500 && status < 600);
 }
 
 function calculateBackoff(attempt) {
   return RETRY_DELAY_MS * Math.pow(2, attempt - 1);
 }
 
-async function executeRequest(url, options, timeoutMs) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
-    clearTimeout(timeoutId);
-    const text = await res.text();
-    const json = parseResponse(text);
-    return { res, text, json };
-  } catch (err) {
-    clearTimeout(timeoutId);
-    throw err;
-  }
-}
-
-async function handleRetry(message, attempt, maxRetries, delayMs = null) {
-  if (delayMs) {
-    core.warning(`${message}, retrying in ${delayMs}ms... (attempt ${attempt}/${maxRetries})`);
-    await sleep(delayMs);
-  } else {
-    core.warning(`${message}, retrying... (attempt ${attempt}/${maxRetries})`);
-  }
-}
-
-async function handleHttpError(err, res, attempt, maxRetries) {
-  const shouldRetry = isRetryableError(res.status) && attempt < maxRetries;
-  if (!shouldRetry) throw err;
-  await handleRetry(`API error (${res.status})`, attempt, maxRetries, calculateBackoff(attempt));
-  return err;
-}
-
-async function handleCatchError(err, attempt, maxRetries, timeoutMs) {
-  const isTimeout = err.name === "AbortError";
-  const canRetry = attempt < maxRetries;
-
-  if (isTimeout) {
-    const timeoutErr = createTimeoutError(timeoutMs);
-    if (!canRetry) throw timeoutErr;
-    await handleRetry("Request timeout", attempt, maxRetries);
-    return timeoutErr;
-  }
-
-  const isNetworkError = !err.status;
-  if (isNetworkError && canRetry) {
-    await handleRetry(`Network error: ${err.message}`, attempt, maxRetries, calculateBackoff(attempt));
-    return err;
-  }
-
-  throw err;
-}
-
 async function fetchJson(url, options, { timeoutMs = DEFAULT_TIMEOUT_MS, maxRetries = MAX_RETRIES } = {}) {
   let lastError;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
     try {
-      const { res, text, json } = await executeRequest(url, options, timeoutMs);
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timeoutId);
+
+      const text = await res.text();
+      const json = parseResponse(text);
+
       if (res.ok) return json;
 
       const err = createHttpError(json, text, res.status);
-      lastError = await handleHttpError(err, res, attempt, maxRetries);
+      if (!isRetryableError(res.status) || attempt >= maxRetries) throw err;
+
+      const delay = calculateBackoff(attempt);
+      core.warning(`API error (${res.status}), retrying in ${delay}ms... (${attempt}/${maxRetries})`);
+      await sleep(delay);
+      lastError = err;
+
     } catch (err) {
-      lastError = await handleCatchError(err, attempt, maxRetries, timeoutMs);
+      clearTimeout(timeoutId);
+
+      if (err.name === "AbortError") {
+        const timeoutErr = new Error(`Request timed out after ${timeoutMs}ms`);
+        timeoutErr.status = 408;
+        if (attempt >= maxRetries) throw timeoutErr;
+        core.warning(`Timeout, retrying... (${attempt}/${maxRetries})`);
+        lastError = timeoutErr;
+        continue;
+      }
+
+      if (!err.status && attempt < maxRetries) {
+        const delay = calculateBackoff(attempt);
+        core.warning(`Network error: ${err.message}, retrying in ${delay}ms... (${attempt}/${maxRetries})`);
+        await sleep(delay);
+        lastError = err;
+        continue;
+      }
+
+      throw err;
     }
   }
   throw lastError;
 }
 
+// ============================================================================
+// LLM Integration
+// ============================================================================
+
+async function callLLM(baseUrl, apiKey, model, systemPrompt, userPrompt) {
+  const url = `${baseUrl}/chat/completions`;
+
+  const payload = {
+    model,
+    temperature: 0.2,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt }
+    ],
+    response_format: { type: "text" }
+  };
+
+  const json = await fetchJson(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`
+    },
+    body: JSON.stringify(payload)
+  });
+
+  return json?.choices?.[0]?.message?.content ?? json?.choices?.[0]?.text ?? "";
+}
+
+// ============================================================================
+// Prompt Builders
+// ============================================================================
+
+function buildSummaryPrompt({ language, extra_instructions, filesSummary, diffText }) {
+  return [
+    `You are a senior software engineer doing a pull request code review.`,
+    `Reply in ${language}.`,
+    `Be concise but specific. Prefer bullet points.`,
+    `Focus on: bugs, security, correctness, performance, DX, and test gaps.`,
+    `If you suggest changes, show small code snippets or exact lines (file:line if possible).`,
+    extra_instructions ? `Extra instructions: ${extra_instructions}` : ``,
+    ``,
+    `Files in PR (with additions/deletions):`,
+    filesSummary,
+    ``,
+    `Unified diff (may be truncated):`,
+    diffText
+  ].filter(Boolean).join("\n");
+}
+
+function buildFilePrompt({ language, extra_instructions, filename, diffChunk, chunkInfo }) {
+  const chunkNote = chunkInfo ? `\n(This is ${chunkInfo})` : "";
+  return [
+    `Review the following file diff.${chunkNote}`,
+    ``,
+    `File: ${filename}`,
+    ``,
+    `Focus on:`,
+    `- Bugs`,
+    `- Security issues`,
+    `- Incorrect logic`,
+    `- Performance problems`,
+    `- Missing edge cases`,
+    `- Concrete improvement suggestions`,
+    ``,
+    `If possible, suggest small code snippets or exact fixes.`,
+    `Reply in ${language}.`,
+    `Be concise. Prefer bullet points.`,
+    `Do NOT repeat the diff.`,
+    extra_instructions ? `\nExtra instructions: ${extra_instructions}` : ``,
+    ``,
+    `Diff:`,
+    diffChunk
+  ].filter(Boolean).join("\n");
+}
+
+const SYSTEM_PROMPT = "You are a senior software engineer doing a careful, strict code review.";
+
+// ============================================================================
+// Review Functions
+// ============================================================================
+
+async function reviewFile(baseUrl, apiKey, model, language, extra, file) {
+  const chunks = chunkString(file.patch, CHUNK_SIZE);
+  const responses = [];
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunkInfo = chunks.length > 1 ? `part ${i + 1}/${chunks.length}` : null;
+    const prompt = buildFilePrompt({
+      language,
+      extra_instructions: extra,
+      filename: file.filename,
+      diffChunk: chunks[i],
+      chunkInfo
+    });
+
+    core.info(`  Reviewing ${file.filename}${chunkInfo ? ` (${chunkInfo})` : ""}...`);
+
+    const response = await callLLM(baseUrl, apiKey, model, SYSTEM_PROMPT, prompt);
+    if (response && !isEmptyReview(response)) {
+      responses.push(response);
+    }
+  }
+
+  if (responses.length === 0) return null;
+  if (responses.length === 1) return responses[0];
+
+  // Combine multiple chunk responses
+  return responses.map((r, i) => `**Part ${i + 1}:**\n${r}`).join("\n\n");
+}
+
+async function postInlineReview(octokit, repo, prNumber, file, reviewBody, model) {
+  const position = getFirstHunkPosition(file.patch);
+
+  try {
+    await octokit.rest.pulls.createReview({
+      ...repo,
+      pull_number: prNumber,
+      event: "COMMENT",
+      comments: [
+        {
+          path: file.filename,
+          position,
+          body: `🤖 **AI Review** (${model})\n\n${reviewBody}`
+        }
+      ]
+    });
+    core.info(`  Posted inline review for ${file.filename}`);
+  } catch (err) {
+    // Fallback: if inline comment fails, log warning but don't fail
+    core.warning(`Failed to post inline comment for ${file.filename}: ${err.message}`);
+    return false;
+  }
+  return true;
+}
+
 async function createOrUpdateComment(octokit, repo, issue_number, body, commentMarker) {
-  // Sticky comment: updates existing comment when action re-runs
   const marker = `<!-- ${commentMarker} -->`;
   const finalBody = `${marker}\n${body}`;
 
@@ -31991,27 +32144,15 @@ async function createOrUpdateComment(octokit, repo, issue_number, body, commentM
   }
 }
 
-function buildPrompt({ language, extra_instructions, filesSummary, diffText }) {
-  return [
-    `You are a senior software engineer doing a pull request code review.`,
-    `Reply in ${language}.`,
-    `Be concise but specific. Prefer bullet points.`,
-    `Focus on: bugs, security, correctness, performance, DX, and test gaps.`,
-    `If you suggest changes, show small code snippets or exact lines (file:line if possible).`,
-    extra_instructions ? `Extra instructions: ${extra_instructions}` : ``,
-    ``,
-    `Files in PR (with additions/deletions):`,
-    filesSummary,
-    ``,
-    `Unified diff (may be truncated):`,
-    diffText
-  ].filter(Boolean).join("\n");
-}
+// ============================================================================
+// Main Execution
+// ============================================================================
 
 async function main() {
   const token = process.env.GITHUB_TOKEN;
   if (!token) throw new Error("GITHUB_TOKEN is required");
 
+  // Read inputs
   const baseUrlInput = core.getInput("base_url", { required: true }).trim().replace(/\/+$/, "");
   const apiKey = core.getInput("api_key", { required: true }).trim();
   const model = core.getInput("model", { required: true }).trim();
@@ -32021,6 +32162,7 @@ async function main() {
   const failOnIssues = (core.getInput("fail_on_issues") || "false").toLowerCase() === "true";
   const extra = core.getInput("extra_instructions") || "";
   const commentMarker = core.getInput("comment_marker") || "AI_PR_REVIEW_ACTION";
+  const reviewMode = core.getInput("review_mode") || "summary"; // "summary" or "inline"
 
   const ctx = github.context;
   if (!ctx.payload.pull_request) {
@@ -32032,10 +32174,12 @@ async function main() {
   const owner = ctx.repo.owner;
   const repoName = ctx.repo.repo;
   const repo = { owner, repo: repoName };
-
   const octokit = github.getOctokit(token);
 
-  // 1) PR files
+  core.info(`Starting AI PR Review for PR #${pr.number}`);
+  core.info(`Mode: ${reviewMode}, Model: ${model}`);
+
+  // 1) Fetch PR files
   const files = [];
   let page = 1;
   while (true) {
@@ -32050,90 +32194,104 @@ async function main() {
     page++;
   }
 
-  const sliced = files.slice(0, maxFiles);
-  const filesSummary = sliced
-    .map(f => `- ${f.filename} (+${f.additions}/-${f.deletions})`)
-    .join("\n");
+  // Filter files with patches (skip binary/large files)
+  const reviewableFiles = files
+    .slice(0, maxFiles)
+    .filter(f => f.patch && f.patch.length > 0);
 
-  // 2) Build diff
-  // GitHub "patch" field may be empty for binary/large files. Only include available patches.
-  const diffParts = [];
-  for (const f of sliced) {
-    if (!f.patch) continue;
-    diffParts.push(`--- a/${f.filename}\n+++ b/${f.filename}\n${f.patch}\n`);
+  core.info(`Found ${files.length} files, reviewing ${reviewableFiles.length} with patches`);
+
+  if (reviewableFiles.length === 0) {
+    core.info("No reviewable files found (all binary or too large). Skipping.");
+    return;
   }
-  let diffText = diffParts.join("\n");
-  diffText = cut(diffText, maxChars);
 
-  // 3) Estimate tokens and warn if potentially exceeding limits
-  const prompt = buildPrompt({ language, extra_instructions: extra, filesSummary, diffText });
-  const estimatedInputTokens = estimateTokens(prompt);
-  const TOKEN_WARNING_THRESHOLD = 25000; // Warn if input exceeds ~25k tokens
+  // 2) Execute review based on mode
+  if (reviewMode === "inline") {
+    // Inline mode: review each file separately and post inline comments
+    let successCount = 0;
+    let skipCount = 0;
 
-  if (estimatedInputTokens > TOKEN_WARNING_THRESHOLD) {
-    core.warning(
-      `Large prompt detected: ~${estimatedInputTokens} tokens estimated. ` +
-      `This may exceed model context limits. Consider reducing max_files or max_chars.`
-    );
-  }
-  core.info(`Estimated input tokens: ~${estimatedInputTokens}`);
+    for (const file of reviewableFiles) {
+      try {
+        const reviewBody = await reviewFile(baseUrlInput, apiKey, model, language, extra, file);
 
-  // 4) Call OpenAI-compatible chat/completions
-  const url = `${baseUrlInput}/chat/completions`;
+        if (reviewBody) {
+          const posted = await postInlineReview(octokit, repo, pr.number, file, reviewBody, model);
+          if (posted) successCount++;
+        } else {
+          skipCount++;
+          core.info(`  Skipped ${file.filename} (no issues found)`);
+        }
+      } catch (err) {
+        core.warning(`Failed to review ${file.filename}: ${err.message}`);
+      }
+    }
 
-  // Use response_format=text for LM Studio compatibility.
-  // Cloud endpoints also accept this format.
-  const payload = {
-    model,
-    temperature: 0.2,
-    messages: [
-      { role: "system", content: "You are a careful, strict code reviewer." },
-      { role: "user", content: prompt }
-    ],
-    response_format: { type: "text" }
-  };
+    core.info(`Inline review complete: ${successCount} comments posted, ${skipCount} files skipped`);
 
-  const json = await fetchJson(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`
-    },
-    body: JSON.stringify(payload)
-  });
+  } else {
+    // Summary mode: single PR comment with all files (original behavior)
+    const filesSummary = reviewableFiles
+      .map(f => `- ${f.filename} (+${f.additions}/-${f.deletions})`)
+      .join("\n");
 
-  const content =
-    json?.choices?.[0]?.message?.content ??
-    json?.choices?.[0]?.text ??
-    "";
+    // Build combined diff
+    const diffParts = [];
+    let totalChars = 0;
+    for (const f of reviewableFiles) {
+      const fileDiff = `--- a/${f.filename}\n+++ b/${f.filename}\n${f.patch}\n`;
+      if (totalChars + fileDiff.length > maxChars) {
+        diffParts.push(`...[${reviewableFiles.length - diffParts.length} more files truncated]\n`);
+        break;
+      }
+      diffParts.push(fileDiff);
+      totalChars += fileDiff.length;
+    }
+    const diffText = diffParts.join("\n");
 
-  if (!content) throw new Error("Model returned empty response");
+    // Estimate tokens
+    const prompt = buildSummaryPrompt({ language, extra_instructions: extra, filesSummary, diffText });
+    const estimatedTokens = estimateTokens(prompt);
+    core.info(`Estimated input tokens: ~${estimatedTokens}`);
 
-  // 5) Post comment
-  const header = [
-    `## 🤖 AI PR Review`,
-    `- Model: \`${model}\``,
-    `- Endpoint: \`${baseUrlInput}\``,
-    ``,
-  ].join("\n");
+    if (estimatedTokens > 25000) {
+      core.warning(`Large prompt detected (~${estimatedTokens} tokens). Consider using inline mode or reducing max_files.`);
+    }
 
-  await createOrUpdateComment(octokit, repo, pr.number, header + content, commentMarker);
+    // Call LLM
+    const content = await callLLM(baseUrlInput, apiKey, model, SYSTEM_PROMPT, prompt);
 
-  // 6) Optional fail on critical issues (simple heuristic)
-  if (failOnIssues) {
-    const lowered = content.toLowerCase();
-    const hasCritical = ["kritik", "critical", "security", "rce", "sql injection", "auth bypass"].some(k => lowered.includes(k));
-    if (hasCritical) {
-      core.setFailed("Critical issues detected by AI review (fail_on_issues=true).");
+    if (!content) throw new Error("Model returned empty response");
+
+    // Post summary comment
+    const header = [
+      `## 🤖 AI PR Review`,
+      `- Model: \`${model}\``,
+      `- Files reviewed: ${reviewableFiles.length}`,
+      ``,
+    ].join("\n");
+
+    await createOrUpdateComment(octokit, repo, pr.number, header + content, commentMarker);
+    core.info("Summary review posted successfully.");
+
+    // Check for critical issues
+    if (failOnIssues) {
+      const lowered = content.toLowerCase();
+      const criticalKeywords = ["kritik", "critical", "security", "rce", "sql injection", "auth bypass", "vulnerability"];
+      if (criticalKeywords.some(k => lowered.includes(k))) {
+        core.setFailed("Critical issues detected by AI review (fail_on_issues=true).");
+      }
     }
   }
 
-  core.info("AI review posted successfully.");
+  core.info("AI PR Review completed.");
 }
 
 main().catch(err => {
   core.setFailed(`${err.message}${err.status ? ` (HTTP ${err.status})` : ""}`);
 });
+
 module.exports = __webpack_exports__;
 /******/ })()
 ;
