@@ -7,6 +7,7 @@ A GitHub Action that automatically reviews pull requests using any OpenAI-compat
 - Works with any OpenAI-compatible endpoint (LM Studio, OpenAI, Azure OpenAI, Ollama, etc.)
 - Configurable review language (default: Turkish)
 - Sticky comments - updates existing review instead of creating duplicates
+- Multi-job support with unique comment markers
 - Configurable file and diff size limits
 - Optional workflow failure on critical issues detected
 - Custom reviewer instructions support
@@ -19,6 +20,10 @@ A GitHub Action that automatically reviews pull requests using any OpenAI-compat
 ```yaml
 name: AI PR Review
 
+permissions:
+  contents: read
+  pull-requests: write
+
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -28,34 +33,40 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: AI Code Review
-        uses: cumartesiolsun/ai-pr-review-action@v0.1.0
+        uses: cumartesiolsun/ai-pr-review-action@v0.2.0
         with:
           base_url: "https://api.openai.com/v1"
           api_key: ${{ secrets.OPENAI_API_KEY }}
           model: "gpt-4o"
           language: "English"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
 ```
 
 ### Using with LM Studio (Local)
 
 ```yaml
 - name: AI Code Review
-  uses: cumartesiolsun/ai-pr-review-action@v0.1.0
+  uses: cumartesiolsun/ai-pr-review-action@v0.2.0
   with:
     base_url: "http://localhost:1234/v1"
     api_key: "lm-studio"
     model: "qwen2.5-coder-32b-instruct"
     language: "Turkish"
   env:
-    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    GITHUB_TOKEN: ${{ github.token }}
 ```
 
 ### Multi-Model Review (Two Jobs)
 
+Use `comment_marker` to prevent jobs from overwriting each other's comments:
+
 ```yaml
 name: AI PR Review
+
+permissions:
+  contents: read
+  pull-requests: write
 
 on:
   pull_request:
@@ -66,29 +77,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: General Code Review
-        uses: cumartesiolsun/ai-pr-review-action@v0.1.0
+        uses: cumartesiolsun/ai-pr-review-action@v0.2.0
         with:
           base_url: ${{ secrets.LLM_BASE_URL }}
           api_key: ${{ secrets.LLM_API_KEY }}
           model: "openai/gpt-oss-20b"
           language: "Turkish"
           extra_instructions: "Focus on architecture, design patterns, and maintainability."
+          comment_marker: "GENERAL_REVIEW"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
 
   code-review:
     runs-on: ubuntu-latest
     steps:
       - name: Code-Focused Review
-        uses: cumartesiolsun/ai-pr-review-action@v0.1.0
+        uses: cumartesiolsun/ai-pr-review-action@v0.2.0
         with:
           base_url: ${{ secrets.LLM_BASE_URL }}
           api_key: ${{ secrets.LLM_API_KEY }}
           model: "qwen3-coder"
           language: "Turkish"
           extra_instructions: "Focus on bugs, security issues, and suggest specific code patches."
+          comment_marker: "CODE_REVIEW"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
 ```
 
 ## Inputs
@@ -103,6 +116,7 @@ jobs:
 | `max_chars` | No | `120000` | Maximum diff characters (10k-500k) |
 | `fail_on_issues` | No | `false` | Fail workflow if critical issues found |
 | `extra_instructions` | No | - | Additional reviewer instructions |
+| `comment_marker` | No | `AI_PR_REVIEW` | Unique marker for sticky comments (use different values for multi-job setups) |
 
 ## How It Works
 
@@ -111,12 +125,12 @@ jobs:
 3. Estimates token count and warns if exceeding limits
 4. Builds a review prompt with file changes and diff content
 5. Sends to configured OpenAI-compatible endpoint (with retry on failure)
-6. Posts review as a PR comment (updates existing if re-run)
+6. Posts review as a PR comment (updates existing based on `comment_marker`)
 7. Optionally fails workflow if critical issues detected
 
 ## Environment Variables
 
-- `GITHUB_TOKEN` - Required for GitHub API access (automatically provided by GitHub Actions)
+- `GITHUB_TOKEN` - Required for GitHub API access. Use `${{ github.token }}` (recommended) or `${{ secrets.GITHUB_TOKEN }}`
 
 ## Development
 
@@ -134,7 +148,7 @@ Use semantic versioning tags for stable references:
 
 ```yaml
 # Recommended: use a specific version
-uses: cumartesiolsun/ai-pr-review-action@v0.1.0
+uses: cumartesiolsun/ai-pr-review-action@v0.2.0
 
 # Or use major version for automatic minor/patch updates
 uses: cumartesiolsun/ai-pr-review-action@v0

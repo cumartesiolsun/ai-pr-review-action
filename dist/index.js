@@ -31964,9 +31964,9 @@ async function fetchJson(url, options, { timeoutMs = DEFAULT_TIMEOUT_MS, maxRetr
   throw lastError;
 }
 
-async function createOrUpdateComment(octokit, repo, issue_number, body) {
+async function createOrUpdateComment(octokit, repo, issue_number, body, commentMarker) {
   // Sticky comment: updates existing comment when action re-runs
-  const marker = "<!-- AI_PR_REVIEW_ACTION -->";
+  const marker = `<!-- ${commentMarker} -->`;
   const finalBody = `${marker}\n${body}`;
 
   const comments = await octokit.rest.issues.listComments({
@@ -32020,6 +32020,7 @@ async function main() {
   const maxChars = clampInt(core.getInput("max_chars"), 120000, 10000, 500000);
   const failOnIssues = (core.getInput("fail_on_issues") || "false").toLowerCase() === "true";
   const extra = core.getInput("extra_instructions") || "";
+  const commentMarker = core.getInput("comment_marker") || "AI_PR_REVIEW";
 
   const ctx = github.context;
   if (!ctx.payload.pull_request) {
@@ -32116,7 +32117,7 @@ async function main() {
     ``,
   ].join("\n");
 
-  await createOrUpdateComment(octokit, repo, pr.number, header + content);
+  await createOrUpdateComment(octokit, repo, pr.number, header + content, commentMarker);
 
   // 6) Optional fail on critical issues (simple heuristic)
   if (failOnIssues) {
