@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: AI Code Review
-        uses: cumartesiolsun/ai-pr-review-action@v0.4.0
+        uses: cumartesiolsun/ai-pr-review-action@v0.4.1
         with:
           base_url: "https://api.openai.com/v1"
           api_key: ${{ secrets.OPENAI_API_KEY }}
@@ -53,7 +53,7 @@ Posts inline review comments directly on each file in the PR:
 
 ```yaml
 - name: AI Code Review (Inline)
-  uses: cumartesiolsun/ai-pr-review-action@v0.4.0
+  uses: cumartesiolsun/ai-pr-review-action@v0.4.1
   with:
     base_url: "https://api.openai.com/v1"
     api_key: ${{ secrets.OPENAI_API_KEY }}
@@ -68,7 +68,7 @@ Posts inline review comments directly on each file in the PR:
 
 ```yaml
 - name: AI Code Review
-  uses: cumartesiolsun/ai-pr-review-action@v0.4.0
+  uses: cumartesiolsun/ai-pr-review-action@v0.4.1
   with:
     base_url: "http://localhost:1234/v1"
     api_key: "lm-studio"
@@ -101,7 +101,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: General Code Review
-        uses: cumartesiolsun/ai-pr-review-action@v0.4.0
+        uses: cumartesiolsun/ai-pr-review-action@v0.4.1
         with:
           base_url: ${{ secrets.LLM_BASE_URL }}
           api_key: ${{ secrets.LLM_API_KEY }}
@@ -117,7 +117,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Code-Focused Review (Inline)
-        uses: cumartesiolsun/ai-pr-review-action@v0.4.0
+        uses: cumartesiolsun/ai-pr-review-action@v0.4.1
         with:
           base_url: ${{ secrets.LLM_BASE_URL }}
           api_key: ${{ secrets.LLM_API_KEY }}
@@ -210,6 +210,9 @@ Empty or "looks good" responses are automatically filtered to reduce noise. Phra
 # Install dependencies
 npm install
 
+# Run tests
+npm test
+
 # Build the action (creates dist/index.js)
 npm run build
 ```
@@ -218,13 +221,20 @@ npm run build
 
 ```yaml
 # Recommended: use a specific version
-uses: cumartesiolsun/ai-pr-review-action@v0.4.0
+uses: cumartesiolsun/ai-pr-review-action@v0.4.1
 
 # Or use major version for automatic minor/patch updates
 uses: cumartesiolsun/ai-pr-review-action@v0
 ```
 
 ## Changelog
+
+### v0.4.1
+- Modularized codebase: extracted utility functions to separate module
+- Added comprehensive JSDoc documentation to all functions
+- Extracted magic numbers to named constants for maintainability
+- Added Jest testing framework with 24 unit tests
+- Added `npm test` script for running tests
 
 ### v0.4.0
 - Added `timeout_ms`, `max_tokens`, `chunk_size_chars`, `max_diff_chars_per_file` inputs
