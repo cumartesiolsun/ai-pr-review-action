@@ -29922,6 +29922,137 @@ function wrappy (fn, cb) {
 
 /***/ }),
 
+/***/ 5804:
+/***/ ((module) => {
+
+// ============================================================================
+// Configuration Constants
+// ============================================================================
+
+const CHARS_PER_TOKEN_ESTIMATE = 4;
+const MIN_REVIEW_LENGTH = 20;
+const EMPTY_REVIEW_MAX_LENGTH = 100;
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/**
+ * Parses and clamps an integer value within specified bounds.
+ * @param {string|null|undefined} val - The value to parse
+ * @param {number} def - Default value if parsing fails
+ * @param {number} min - Minimum allowed value
+ * @param {number} max - Maximum allowed value
+ * @returns {number} The clamped integer value
+ */
+function clampInt(val, def, min, max) {
+  const n = Number.parseInt(val ?? "", 10);
+  if (Number.isNaN(n)) return def;
+  return Math.max(min, Math.min(max, n));
+}
+
+/**
+ * Returns a promise that resolves after the specified delay.
+ * @param {number} ms - Delay in milliseconds
+ * @returns {Promise<void>}
+ */
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Estimates the number of tokens in a text string.
+ * @param {string|null|undefined} text - The text to estimate
+ * @returns {number} Estimated token count
+ */
+function estimateTokens(text) {
+  return Math.ceil((text?.length || 0) / CHARS_PER_TOKEN_ESTIMATE);
+}
+
+/**
+ * Splits a string into chunks of specified size.
+ * @param {string|null|undefined} str - The string to split
+ * @param {number} size - Maximum size of each chunk
+ * @returns {string[]} Array of string chunks
+ */
+function chunkString(str, size) {
+  if (!str || str.length <= size) return [str];
+  const chunks = [];
+  for (let i = 0; i < str.length; i += size) {
+    chunks.push(str.slice(i, i + size));
+  }
+  return chunks;
+}
+
+/**
+ * Trims a diff patch to a maximum character length.
+ * @param {string|null|undefined} patch - The diff patch to trim
+ * @param {number} maxChars - Maximum allowed characters
+ * @returns {string} Trimmed patch with truncation indicator if needed
+ */
+function trimDiff(patch, maxChars) {
+  if (!patch) return "";
+  if (patch.length <= maxChars) return patch;
+  return patch.slice(0, maxChars) + "\n...[truncated]\n";
+}
+
+/**
+ * Determines if a review response indicates no issues found.
+ * @param {string|null|undefined} content - The review content to check
+ * @returns {boolean} True if the review is empty or indicates no issues
+ */
+function isEmptyReview(content) {
+  if (!content || content.trim().length < MIN_REVIEW_LENGTH) return true;
+  const lower = content.toLowerCase();
+  const emptyPhrases = [
+    "no issues",
+    "looks good",
+    "lgtm",
+    "no problems",
+    "no concerns",
+    "sorun yok",
+    "problem yok",
+    "iyi görünüyor",
+    "nothing to report",
+    "no suggestions"
+  ];
+  return emptyPhrases.some(phrase => lower.includes(phrase) && content.trim().length < EMPTY_REVIEW_MAX_LENGTH);
+}
+
+/**
+ * Finds the position of the first actual change in a diff patch.
+ * @param {string|null|undefined} patch - The diff patch to analyze
+ * @returns {number} Line position of the first hunk (1-indexed)
+ */
+function getFirstHunkPosition(patch) {
+  if (!patch) return 1;
+  const lines = patch.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith("+") || lines[i].startsWith("-")) {
+      if (!lines[i].startsWith("+++") && !lines[i].startsWith("---")) {
+        return i + 1;
+      }
+    }
+  }
+  return 1;
+}
+
+module.exports = {
+  clampInt,
+  sleep,
+  estimateTokens,
+  chunkString,
+  trimDiff,
+  isEmptyReview,
+  getFirstHunkPosition,
+  CHARS_PER_TOKEN_ESTIMATE,
+  MIN_REVIEW_LENGTH,
+  EMPTY_REVIEW_MAX_LENGTH
+};
+
+
+/***/ }),
+
 /***/ 2613:
 /***/ ((module) => {
 
@@ -31836,84 +31967,42 @@ module.exports = parseParams
 var __webpack_exports__ = {};
 const core = __nccwpck_require__(7484);
 const github = __nccwpck_require__(3228);
+const {
+  clampInt,
+  sleep,
+  estimateTokens,
+  chunkString,
+  trimDiff,
+  isEmptyReview,
+  getFirstHunkPosition
+} = __nccwpck_require__(5804);
 
-// Configuration defaults (can be overridden by inputs)
+// ============================================================================
+// Configuration Constants
+// ============================================================================
+
+// Default values for action inputs (can be overridden by user)
 const DEFAULT_TIMEOUT_MS = 60000;
 const DEFAULT_MAX_TOKENS = 1024;
 const DEFAULT_CHUNK_SIZE = 12000;
 const DEFAULT_MAX_DIFF_PER_FILE = 50000;
+
+// Retry configuration
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
-const CHARS_PER_TOKEN_ESTIMATE = 4;
 
-// ============================================================================
-// Utility Functions
-// ============================================================================
-
-function clampInt(val, def, min, max) {
-  const n = Number.parseInt(val ?? "", 10);
-  if (Number.isNaN(n)) return def;
-  return Math.max(min, Math.min(max, n));
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function estimateTokens(text) {
-  return Math.ceil((text?.length || 0) / CHARS_PER_TOKEN_ESTIMATE);
-}
-
-function chunkString(str, size) {
-  if (!str || str.length <= size) return [str];
-  const chunks = [];
-  for (let i = 0; i < str.length; i += size) {
-    chunks.push(str.slice(i, i + size));
-  }
-  return chunks;
-}
-
-function trimDiff(patch, maxChars) {
-  if (!patch) return "";
-  if (patch.length <= maxChars) return patch;
-  return patch.slice(0, maxChars) + "\n...[truncated]\n";
-}
-
-function isEmptyReview(content) {
-  if (!content || content.trim().length < 20) return true;
-  const lower = content.toLowerCase();
-  const emptyPhrases = [
-    "no issues",
-    "looks good",
-    "lgtm",
-    "no problems",
-    "no concerns",
-    "sorun yok",
-    "problem yok",
-    "iyi görünüyor",
-    "nothing to report",
-    "no suggestions"
-  ];
-  return emptyPhrases.some(phrase => lower.includes(phrase) && content.trim().length < 100);
-}
-
-function getFirstHunkPosition(patch) {
-  if (!patch) return 1;
-  const lines = patch.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].startsWith("+") || lines[i].startsWith("-")) {
-      if (!lines[i].startsWith("+++") && !lines[i].startsWith("---")) {
-        return i + 1;
-      }
-    }
-  }
-  return 1;
-}
+// Token warning threshold
+const TOKEN_WARNING_THRESHOLD = 25000;
 
 // ============================================================================
 // HTTP Client with Retry
 // ============================================================================
 
+/**
+ * Safely parses a JSON string.
+ * @param {string} text - The JSON string to parse
+ * @returns {object|null} Parsed object or null if parsing fails
+ */
 function parseResponse(text) {
   try {
     return JSON.parse(text);
@@ -31922,6 +32011,13 @@ function parseResponse(text) {
   }
 }
 
+/**
+ * Creates an HTTP error with status and body information.
+ * @param {object|null} json - Parsed JSON response
+ * @param {string} text - Raw response text
+ * @param {number} status - HTTP status code
+ * @returns {Error} Error object with status and body properties
+ */
 function createHttpError(json, text, status) {
   const msg = json?.error?.message || json?.error || text || `HTTP ${status}`;
   const err = new Error(msg);
@@ -31930,16 +32026,36 @@ function createHttpError(json, text, status) {
   return err;
 }
 
+/**
+ * Determines if an HTTP error should trigger a retry.
+ * Retries: timeout (408), rate limit (429), server errors (5xx)
+ * No retry: 400 (bad request) or other 4xx client errors
+ * @param {number} status - HTTP status code
+ * @returns {boolean} True if the error is retryable
+ */
 function isRetryableError(status) {
-  // Retry on timeout (408), rate limit (429), server errors (5xx)
-  // Do NOT retry on 400 (bad request) or other 4xx client errors
   return status === 408 || status === 429 || (status >= 500 && status < 600);
 }
 
+/**
+ * Calculates exponential backoff delay for retry attempts.
+ * @param {number} attempt - Current attempt number (1-indexed)
+ * @returns {number} Delay in milliseconds
+ */
 function calculateBackoff(attempt) {
   return RETRY_DELAY_MS * Math.pow(2, attempt - 1);
 }
 
+/**
+ * Fetches JSON from a URL with timeout and retry support.
+ * @param {string} url - The URL to fetch
+ * @param {object} options - Fetch options (method, headers, body)
+ * @param {object} config - Configuration object
+ * @param {number} config.timeoutMs - Request timeout in milliseconds
+ * @param {number} [config.maxRetries=3] - Maximum retry attempts
+ * @returns {Promise<object>} Parsed JSON response
+ * @throws {Error} If all retries fail
+ */
 async function fetchJson(url, options, { timeoutMs, maxRetries = MAX_RETRIES } = {}) {
   let lastError;
 
@@ -31998,6 +32114,18 @@ async function fetchJson(url, options, { timeoutMs, maxRetries = MAX_RETRIES } =
 // LLM Integration
 // ============================================================================
 
+/**
+ * Calls an OpenAI-compatible chat completions API.
+ * @param {object} params - Call parameters
+ * @param {string} params.baseUrl - API base URL
+ * @param {string} params.apiKey - API key for authentication
+ * @param {string} params.model - Model name to use
+ * @param {string} params.systemPrompt - System prompt content
+ * @param {string} params.userPrompt - User prompt content
+ * @param {number} params.maxTokens - Maximum tokens in response
+ * @param {number} params.timeoutMs - Request timeout in milliseconds
+ * @returns {Promise<string>} Generated text response
+ */
 async function callLLM({ baseUrl, apiKey, model, systemPrompt, userPrompt, maxTokens, timeoutMs }) {
   const url = `${baseUrl}/chat/completions`;
 
@@ -32077,6 +32205,22 @@ const SYSTEM_PROMPT = "You are a senior software engineer doing a careful, stric
 // Review Functions
 // ============================================================================
 
+/**
+ * Reviews a single file's diff using the LLM.
+ * Handles chunking for large diffs and aggregates responses.
+ * @param {object} params - Review parameters
+ * @param {string} params.baseUrl - API base URL
+ * @param {string} params.apiKey - API key
+ * @param {string} params.model - Model name
+ * @param {string} params.language - Review language
+ * @param {string} params.extra - Extra instructions
+ * @param {object} params.file - File object with filename and patch
+ * @param {number} params.chunkSizeChars - Maximum chunk size
+ * @param {number} params.maxDiffCharsPerFile - Maximum diff size per file
+ * @param {number} params.maxTokens - Maximum response tokens
+ * @param {number} params.timeoutMs - Request timeout
+ * @returns {Promise<string|null>} Review text or null if no issues found
+ */
 async function reviewFile({ baseUrl, apiKey, model, language, extra, file, chunkSizeChars, maxDiffCharsPerFile, maxTokens, timeoutMs }) {
   // Trim diff if too large
   const trimmedPatch = trimDiff(file.patch, maxDiffCharsPerFile);
@@ -32118,6 +32262,16 @@ async function reviewFile({ baseUrl, apiKey, model, language, extra, file, chunk
   return responses.map((r, i) => `**Part ${i + 1}:**\n${r}`).join("\n\n");
 }
 
+/**
+ * Posts an inline review comment on a PR file.
+ * @param {object} octokit - GitHub Octokit client
+ * @param {object} repo - Repository info {owner, repo}
+ * @param {number} prNumber - Pull request number
+ * @param {object} file - File object with filename and patch
+ * @param {string} reviewBody - Review comment body
+ * @param {string} model - Model name for attribution
+ * @returns {Promise<boolean>} True if comment was posted successfully
+ */
 async function postInlineReview(octokit, repo, prNumber, file, reviewBody, model) {
   const position = getFirstHunkPosition(file.patch);
 
@@ -32142,6 +32296,16 @@ async function postInlineReview(octokit, repo, prNumber, file, reviewBody, model
   return true;
 }
 
+/**
+ * Creates or updates a sticky comment on a PR/issue.
+ * Uses an HTML marker to identify and update existing comments.
+ * @param {object} octokit - GitHub Octokit client
+ * @param {object} repo - Repository info {owner, repo}
+ * @param {number} issue_number - Issue/PR number
+ * @param {string} body - Comment body content
+ * @param {string} commentMarker - Unique marker for identifying the comment
+ * @returns {Promise<void>}
+ */
 async function createOrUpdateComment(octokit, repo, issue_number, body, commentMarker) {
   const marker = `<!-- ${commentMarker} -->`;
   const finalBody = `${marker}\n${body}`;
@@ -32172,6 +32336,11 @@ async function createOrUpdateComment(octokit, repo, issue_number, body, commentM
 // Main Execution
 // ============================================================================
 
+/**
+ * Main entry point for the GitHub Action.
+ * Orchestrates PR file fetching, LLM review, and comment posting.
+ * @returns {Promise<void>}
+ */
 async function main() {
   const token = process.env.GITHUB_TOKEN;
   if (!token) throw new Error("GITHUB_TOKEN is required");
@@ -32298,7 +32467,7 @@ async function main() {
     const estimatedTokens = estimateTokens(prompt);
     core.info(`Estimated input tokens: ~${estimatedTokens}`);
 
-    if (estimatedTokens > 25000) {
+    if (estimatedTokens > TOKEN_WARNING_THRESHOLD) {
       core.warning(`Large prompt detected (~${estimatedTokens} tokens). Consider using inline mode or reducing max_files.`);
     }
 
