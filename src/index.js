@@ -2,13 +2,25 @@ const core = require("@actions/core");
 const github = require("@actions/github");
 const {
   clampInt,
-  sleep,
   estimateTokens,
   chunkString,
   trimDiff,
   isEmptyReview,
   getFirstHunkPosition
 } = require("./utils");
+const {
+  sleep,
+  parseResponse,
+  createHttpError,
+  isRetryableError,
+  calculateBackoff,
+  MAX_RETRIES
+} = require("./http");
+const {
+  SYSTEM_PROMPT,
+  buildSummaryPrompt,
+  buildFilePrompt
+} = require("./prompts");
 
 // ============================================================================
 // Configuration Constants
@@ -20,67 +32,16 @@ const DEFAULT_MAX_TOKENS = 1024;
 const DEFAULT_CHUNK_SIZE = 12000;
 const DEFAULT_MAX_DIFF_PER_FILE = 50000;
 
-// Retry configuration
-const MAX_RETRIES = 3;
-const RETRY_DELAY_MS = 1000;
-
 // Token warning threshold
 const TOKEN_WARNING_THRESHOLD = 25000;
 
 // ============================================================================
-// HTTP Client with Retry
+// HTTP Client with Retry (uses functions from ./http.js)
 // ============================================================================
 
 /**
- * Safely parses a JSON string.
- * @param {string} text - The JSON string to parse
- * @returns {object|null} Parsed object or null if parsing fails
- */
-function parseResponse(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Creates an HTTP error with status and body information.
- * @param {object|null} json - Parsed JSON response
- * @param {string} text - Raw response text
- * @param {number} status - HTTP status code
- * @returns {Error} Error object with status and body properties
- */
-function createHttpError(json, text, status) {
-  const msg = json?.error?.message || json?.error || text || `HTTP ${status}`;
-  const err = new Error(msg);
-  err.status = status;
-  err.body = text;
-  return err;
-}
-
-/**
- * Determines if an HTTP error should trigger a retry.
- * Retries: timeout (408), rate limit (429), server errors (5xx)
- * No retry: 400 (bad request) or other 4xx client errors
- * @param {number} status - HTTP status code
- * @returns {boolean} True if the error is retryable
- */
-function isRetryableError(status) {
-  return status === 408 || status === 429 || (status >= 500 && status < 600);
-}
-
-/**
- * Calculates exponential backoff delay for retry attempts.
- * @param {number} attempt - Current attempt number (1-indexed)
- * @returns {number} Delay in milliseconds
- */
-function calculateBackoff(attempt) {
-  return RETRY_DELAY_MS * Math.pow(2, attempt - 1);
-}
-
-/**
  * Fetches JSON from a URL with timeout and retry support.
+ * Wrapper around http.js functions with core.warning integration.
  * @param {string} url - The URL to fetch
  * @param {object} options - Fetch options (method, headers, body)
  * @param {object} config - Configuration object
@@ -184,55 +145,6 @@ async function callLLM({ baseUrl, apiKey, model, systemPrompt, userPrompt, maxTo
 
   return json?.choices?.[0]?.message?.content ?? json?.choices?.[0]?.text ?? "";
 }
-
-// ============================================================================
-// Prompt Builders
-// ============================================================================
-
-function buildSummaryPrompt({ language, extra_instructions, filesSummary, diffText }) {
-  return [
-    `You are a senior software engineer doing a pull request code review.`,
-    `Reply in ${language}.`,
-    `Be concise but specific. Prefer bullet points.`,
-    `Focus on: bugs, security, correctness, performance, DX, and test gaps.`,
-    `If you suggest changes, show small code snippets or exact lines (file:line if possible).`,
-    extra_instructions ? `Extra instructions: ${extra_instructions}` : ``,
-    ``,
-    `Files in PR (with additions/deletions):`,
-    filesSummary,
-    ``,
-    `Unified diff (may be truncated):`,
-    diffText
-  ].filter(Boolean).join("\n");
-}
-
-function buildFilePrompt({ language, extra_instructions, filename, diffChunk, chunkInfo }) {
-  const chunkNote = chunkInfo ? `\n(This is ${chunkInfo})` : "";
-  return [
-    `Review the following file diff.${chunkNote}`,
-    ``,
-    `File: ${filename}`,
-    ``,
-    `Focus on:`,
-    `- Bugs`,
-    `- Security issues`,
-    `- Incorrect logic`,
-    `- Performance problems`,
-    `- Missing edge cases`,
-    `- Concrete improvement suggestions`,
-    ``,
-    `If possible, suggest small code snippets or exact fixes.`,
-    `Reply in ${language}.`,
-    `Be concise. Prefer bullet points.`,
-    `Do NOT repeat the diff.`,
-    extra_instructions ? `\nExtra instructions: ${extra_instructions}` : ``,
-    ``,
-    `Diff:`,
-    diffChunk
-  ].filter(Boolean).join("\n");
-}
-
-const SYSTEM_PROMPT = "You are a senior software engineer doing a careful, strict code review.";
 
 // ============================================================================
 // Review Functions
