@@ -6,14 +6,14 @@ A GitHub Action that automatically reviews pull requests using any OpenAI-compat
 
 - **Two review modes**: Summary (single PR comment) or Inline (per-file comments)
 - Works with any OpenAI-compatible endpoint (LM Studio, OpenAI, Azure OpenAI, Ollama, etc.)
-- **Diff chunking**: Handles large files by splitting into ~12k char chunks
+- **Configurable chunking**: Handles large files by splitting diffs into chunks
+- **Per-file diff trimming**: Prevents token overflow on large files
 - **Smart filtering**: Skips "no issues" responses to avoid noise
 - Configurable review language (default: Turkish)
 - Sticky comments - updates existing review instead of creating duplicates
 - Multi-job support with unique comment markers
 - Built-in retry mechanism with exponential backoff (handles 429, 5xx errors)
-- Request timeout handling (60 second default)
-- Token estimation and large prompt warnings
+- Configurable timeout, max tokens, and chunk sizes
 
 ## Usage
 
@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: AI Code Review
-        uses: cumartesiolsun/ai-pr-review-action@v0.3.0
+        uses: cumartesiolsun/ai-pr-review-action@v0.4.0
         with:
           base_url: "https://api.openai.com/v1"
           api_key: ${{ secrets.OPENAI_API_KEY }}
@@ -53,7 +53,7 @@ Posts inline review comments directly on each file in the PR:
 
 ```yaml
 - name: AI Code Review (Inline)
-  uses: cumartesiolsun/ai-pr-review-action@v0.3.0
+  uses: cumartesiolsun/ai-pr-review-action@v0.4.0
   with:
     base_url: "https://api.openai.com/v1"
     api_key: ${{ secrets.OPENAI_API_KEY }}
@@ -68,13 +68,15 @@ Posts inline review comments directly on each file in the PR:
 
 ```yaml
 - name: AI Code Review
-  uses: cumartesiolsun/ai-pr-review-action@v0.3.0
+  uses: cumartesiolsun/ai-pr-review-action@v0.4.0
   with:
     base_url: "http://localhost:1234/v1"
     api_key: "lm-studio"
     model: "qwen2.5-coder-32b-instruct"
     language: "Turkish"
     review_mode: "inline"
+    timeout_ms: "180000"  # 3 minutes for local models
+    max_tokens: "2048"
   env:
     GITHUB_TOKEN: ${{ github.token }}
 ```
@@ -99,7 +101,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: General Code Review
-        uses: cumartesiolsun/ai-pr-review-action@v0.3.0
+        uses: cumartesiolsun/ai-pr-review-action@v0.4.0
         with:
           base_url: ${{ secrets.LLM_BASE_URL }}
           api_key: ${{ secrets.LLM_API_KEY }}
@@ -115,7 +117,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Code-Focused Review (Inline)
-        uses: cumartesiolsun/ai-pr-review-action@v0.3.0
+        uses: cumartesiolsun/ai-pr-review-action@v0.4.0
         with:
           base_url: ${{ secrets.LLM_BASE_URL }}
           api_key: ${{ secrets.LLM_API_KEY }}
@@ -137,7 +139,11 @@ jobs:
 | `language` | No | `Turkish` | Review output language |
 | `review_mode` | No | `summary` | `summary` for single PR comment, `inline` for per-file comments |
 | `max_files` | No | `25` | Maximum files to review (1-200) |
-| `max_chars` | No | `120000` | Maximum diff characters (10k-500k), used in summary mode |
+| `max_chars` | No | `120000` | Maximum total diff characters (10k-500k), used in summary mode |
+| `timeout_ms` | No | `60000` | Request timeout in milliseconds (5k-600k) |
+| `max_tokens` | No | `1024` | Max output tokens for LLM response (50-8000) |
+| `chunk_size_chars` | No | `12000` | Chunk size for splitting large diffs (1k-50k) |
+| `max_diff_chars_per_file` | No | `50000` | Max diff chars per file before trimming (1k-200k) |
 | `fail_on_issues` | No | `false` | Fail workflow if critical issues found |
 | `extra_instructions` | No | - | Additional reviewer instructions |
 | `comment_marker` | No | `AI_PR_REVIEW_ACTION` | Unique marker for sticky comments (summary mode only) |
@@ -146,14 +152,16 @@ jobs:
 
 ### Summary Mode
 1. Fetches all PR files and builds a combined diff
-2. Sends entire diff to LLM in a single request
-3. Posts one comprehensive review comment on the PR
-4. Updates existing comment on re-runs (sticky comment)
+2. Trims each file's diff to `max_diff_chars_per_file`
+3. Sends entire diff to LLM in a single request
+4. Posts one comprehensive review comment on the PR
+5. Updates existing comment on re-runs (sticky comment)
 
 ### Inline Mode
 1. Fetches all PR files with patches
 2. For each file:
-   - Chunks large diffs into ~12k char pieces
+   - Trims diff to `max_diff_chars_per_file`
+   - Chunks into `chunk_size_chars` pieces
    - Sends each chunk to LLM separately
    - Aggregates responses for multi-chunk files
    - Skips files with "no issues" responses
@@ -162,15 +170,25 @@ jobs:
 
 ## Advanced Features
 
-### Diff Chunking
-Large files are automatically split into ~12k character chunks. Each chunk is reviewed separately and responses are combined:
+### Configurable Chunking
+Large files are automatically split into chunks (default 12k chars). Customize with `chunk_size_chars`:
 
+```yaml
+chunk_size_chars: "8000"  # Smaller chunks for models with limited context
 ```
-**Part 1:**
-- Issue in first section...
 
-**Part 2:**
-- Issue in second section...
+### Per-File Diff Trimming
+Each file's diff is trimmed before processing to prevent token overflow:
+
+```yaml
+max_diff_chars_per_file: "30000"  # Limit each file to 30k chars
+```
+
+### Timeout Configuration
+Adjust timeout for slower models or networks:
+
+```yaml
+timeout_ms: "180000"  # 3 minutes for local models
 ```
 
 ### Smart Response Filtering
@@ -178,8 +196,8 @@ Empty or "looks good" responses are automatically filtered to reduce noise. Phra
 
 ### Retry & Rate Limit Handling
 - Automatic retry on HTTP 429 (rate limit) and 5xx errors
+- **No retry on 400 errors** (bad request - fix the request instead)
 - Exponential backoff: 1s → 2s → 4s
-- 60 second timeout per LLM request
 - Max 3 retries per request
 
 ## Environment Variables
@@ -200,11 +218,31 @@ npm run build
 
 ```yaml
 # Recommended: use a specific version
-uses: cumartesiolsun/ai-pr-review-action@v0.3.0
+uses: cumartesiolsun/ai-pr-review-action@v0.4.0
 
 # Or use major version for automatic minor/patch updates
 uses: cumartesiolsun/ai-pr-review-action@v0
 ```
+
+## Changelog
+
+### v0.4.0
+- Added `timeout_ms`, `max_tokens`, `chunk_size_chars`, `max_diff_chars_per_file` inputs
+- Fixed `max_files` enforcement (now correctly limits reviewed files)
+- 400 errors no longer trigger retries
+- Per-file diff trimming applied before chunking
+
+### v0.3.0
+- Added inline review mode with per-file comments
+- Added diff chunking for large files
+- Added smart response filtering
+
+### v0.2.0
+- Added `comment_marker` for multi-job support
+- Changed to `github.token` in examples
+
+### v0.1.0
+- Initial release with summary mode
 
 ## License
 
