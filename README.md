@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: AI Code Review
-        uses: cumartesiolsun/ai-pr-review-action@v0.4.1
+        uses: cumartesiolsun/ai-pr-review-action@v0.4.2
         with:
           base_url: "https://api.openai.com/v1"
           api_key: ${{ secrets.OPENAI_API_KEY }}
@@ -53,7 +53,7 @@ Posts inline review comments directly on each file in the PR:
 
 ```yaml
 - name: AI Code Review (Inline)
-  uses: cumartesiolsun/ai-pr-review-action@v0.4.1
+  uses: cumartesiolsun/ai-pr-review-action@v0.4.2
   with:
     base_url: "https://api.openai.com/v1"
     api_key: ${{ secrets.OPENAI_API_KEY }}
@@ -68,7 +68,7 @@ Posts inline review comments directly on each file in the PR:
 
 ```yaml
 - name: AI Code Review
-  uses: cumartesiolsun/ai-pr-review-action@v0.4.1
+  uses: cumartesiolsun/ai-pr-review-action@v0.4.2
   with:
     base_url: "http://localhost:1234/v1"
     api_key: "lm-studio"
@@ -101,7 +101,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: General Code Review
-        uses: cumartesiolsun/ai-pr-review-action@v0.4.1
+        uses: cumartesiolsun/ai-pr-review-action@v0.4.2
         with:
           base_url: ${{ secrets.LLM_BASE_URL }}
           api_key: ${{ secrets.LLM_API_KEY }}
@@ -117,7 +117,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Code-Focused Review (Inline)
-        uses: cumartesiolsun/ai-pr-review-action@v0.4.1
+        uses: cumartesiolsun/ai-pr-review-action@v0.4.2
         with:
           base_url: ${{ secrets.LLM_BASE_URL }}
           api_key: ${{ secrets.LLM_API_KEY }}
@@ -221,13 +221,19 @@ npm run build
 
 ```yaml
 # Recommended: use a specific version
-uses: cumartesiolsun/ai-pr-review-action@v0.4.1
+uses: cumartesiolsun/ai-pr-review-action@v0.4.2
 
 # Or use major version for automatic minor/patch updates
 uses: cumartesiolsun/ai-pr-review-action@v0
 ```
 
 ## Changelog
+
+### v0.4.2
+- Comprehensive test coverage with 64 unit tests
+- Extracted HTTP client to http.js module (20 tests)
+- Extracted prompt builders to prompts.js module (20 tests)
+- Modular architecture for better maintainability
 
 ### v0.4.1
 - Modularized codebase: extracted utility functions to separate module
