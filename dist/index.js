@@ -31837,11 +31837,13 @@ var __webpack_exports__ = {};
 const core = __nccwpck_require__(7484);
 const github = __nccwpck_require__(3228);
 
-// Configuration constants
-const DEFAULT_TIMEOUT_MS = 60000; // 60 seconds for LLM calls
+// Configuration defaults (can be overridden by inputs)
+const DEFAULT_TIMEOUT_MS = 60000;
+const DEFAULT_MAX_TOKENS = 1024;
+const DEFAULT_CHUNK_SIZE = 12000;
+const DEFAULT_MAX_DIFF_PER_FILE = 50000;
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
-const CHUNK_SIZE = 12000; // ~12k chars per chunk
 const CHARS_PER_TOKEN_ESTIMATE = 4;
 
 // ============================================================================
@@ -31862,13 +31864,19 @@ function estimateTokens(text) {
   return Math.ceil((text?.length || 0) / CHARS_PER_TOKEN_ESTIMATE);
 }
 
-function chunkString(str, size = CHUNK_SIZE) {
+function chunkString(str, size) {
   if (!str || str.length <= size) return [str];
   const chunks = [];
   for (let i = 0; i < str.length; i += size) {
     chunks.push(str.slice(i, i + size));
   }
   return chunks;
+}
+
+function trimDiff(patch, maxChars) {
+  if (!patch) return "";
+  if (patch.length <= maxChars) return patch;
+  return patch.slice(0, maxChars) + "\n...[truncated]\n";
 }
 
 function isEmptyReview(content) {
@@ -31890,8 +31898,6 @@ function isEmptyReview(content) {
 }
 
 function getFirstHunkPosition(patch) {
-  // Get position of first actual change line in the diff
-  // Position is 1-indexed from the start of the diff
   if (!patch) return 1;
   const lines = patch.split("\n");
   for (let i = 0; i < lines.length; i++) {
@@ -31925,14 +31931,16 @@ function createHttpError(json, text, status) {
 }
 
 function isRetryableError(status) {
-  return status === 429 || (status >= 500 && status < 600);
+  // Retry on timeout (408), rate limit (429), server errors (5xx)
+  // Do NOT retry on 400 (bad request) or other 4xx client errors
+  return status === 408 || status === 429 || (status >= 500 && status < 600);
 }
 
 function calculateBackoff(attempt) {
   return RETRY_DELAY_MS * Math.pow(2, attempt - 1);
 }
 
-async function fetchJson(url, options, { timeoutMs = DEFAULT_TIMEOUT_MS, maxRetries = MAX_RETRIES } = {}) {
+async function fetchJson(url, options, { timeoutMs, maxRetries = MAX_RETRIES } = {}) {
   let lastError;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -31949,7 +31957,10 @@ async function fetchJson(url, options, { timeoutMs = DEFAULT_TIMEOUT_MS, maxRetr
       if (res.ok) return json;
 
       const err = createHttpError(json, text, res.status);
-      if (!isRetryableError(res.status) || attempt >= maxRetries) throw err;
+
+      // Don't retry 4xx errors except 408 and 429
+      if (!isRetryableError(res.status)) throw err;
+      if (attempt >= maxRetries) throw err;
 
       const delay = calculateBackoff(attempt);
       core.warning(`API error (${res.status}), retrying in ${delay}ms... (${attempt}/${maxRetries})`);
@@ -31963,11 +31974,12 @@ async function fetchJson(url, options, { timeoutMs = DEFAULT_TIMEOUT_MS, maxRetr
         const timeoutErr = new Error(`Request timed out after ${timeoutMs}ms`);
         timeoutErr.status = 408;
         if (attempt >= maxRetries) throw timeoutErr;
-        core.warning(`Timeout, retrying... (${attempt}/${maxRetries})`);
+        core.warning(`Timeout after ${timeoutMs}ms, retrying... (${attempt}/${maxRetries})`);
         lastError = timeoutErr;
         continue;
       }
 
+      // Network errors (no status) are retryable
       if (!err.status && attempt < maxRetries) {
         const delay = calculateBackoff(attempt);
         core.warning(`Network error: ${err.message}, retrying in ${delay}ms... (${attempt}/${maxRetries})`);
@@ -31986,12 +31998,13 @@ async function fetchJson(url, options, { timeoutMs = DEFAULT_TIMEOUT_MS, maxRetr
 // LLM Integration
 // ============================================================================
 
-async function callLLM(baseUrl, apiKey, model, systemPrompt, userPrompt) {
+async function callLLM({ baseUrl, apiKey, model, systemPrompt, userPrompt, maxTokens, timeoutMs }) {
   const url = `${baseUrl}/chat/completions`;
 
   const payload = {
     model,
     temperature: 0.2,
+    max_tokens: maxTokens,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt }
@@ -32006,7 +32019,7 @@ async function callLLM(baseUrl, apiKey, model, systemPrompt, userPrompt) {
       "Authorization": `Bearer ${apiKey}`
     },
     body: JSON.stringify(payload)
-  });
+  }, { timeoutMs });
 
   return json?.choices?.[0]?.message?.content ?? json?.choices?.[0]?.text ?? "";
 }
@@ -32064,8 +32077,12 @@ const SYSTEM_PROMPT = "You are a senior software engineer doing a careful, stric
 // Review Functions
 // ============================================================================
 
-async function reviewFile(baseUrl, apiKey, model, language, extra, file) {
-  const chunks = chunkString(file.patch, CHUNK_SIZE);
+async function reviewFile({ baseUrl, apiKey, model, language, extra, file, chunkSizeChars, maxDiffCharsPerFile, maxTokens, timeoutMs }) {
+  // Trim diff if too large
+  const trimmedPatch = trimDiff(file.patch, maxDiffCharsPerFile);
+
+  // Chunk the trimmed diff
+  const chunks = chunkString(trimmedPatch, chunkSizeChars);
   const responses = [];
 
   for (let i = 0; i < chunks.length; i++) {
@@ -32080,7 +32097,16 @@ async function reviewFile(baseUrl, apiKey, model, language, extra, file) {
 
     core.info(`  Reviewing ${file.filename}${chunkInfo ? ` (${chunkInfo})` : ""}...`);
 
-    const response = await callLLM(baseUrl, apiKey, model, SYSTEM_PROMPT, prompt);
+    const response = await callLLM({
+      baseUrl,
+      apiKey,
+      model,
+      systemPrompt: SYSTEM_PROMPT,
+      userPrompt: prompt,
+      maxTokens,
+      timeoutMs
+    });
+
     if (response && !isEmptyReview(response)) {
       responses.push(response);
     }
@@ -32089,7 +32115,6 @@ async function reviewFile(baseUrl, apiKey, model, language, extra, file) {
   if (responses.length === 0) return null;
   if (responses.length === 1) return responses[0];
 
-  // Combine multiple chunk responses
   return responses.map((r, i) => `**Part ${i + 1}:**\n${r}`).join("\n\n");
 }
 
@@ -32111,7 +32136,6 @@ async function postInlineReview(octokit, repo, prNumber, file, reviewBody, model
     });
     core.info(`  Posted inline review for ${file.filename}`);
   } catch (err) {
-    // Fallback: if inline comment fails, log warning but don't fail
     core.warning(`Failed to post inline comment for ${file.filename}: ${err.message}`);
     return false;
   }
@@ -32162,7 +32186,13 @@ async function main() {
   const failOnIssues = (core.getInput("fail_on_issues") || "false").toLowerCase() === "true";
   const extra = core.getInput("extra_instructions") || "";
   const commentMarker = core.getInput("comment_marker") || "AI_PR_REVIEW_ACTION";
-  const reviewMode = core.getInput("review_mode") || "summary"; // "summary" or "inline"
+  const reviewMode = core.getInput("review_mode") || "summary";
+
+  // New configurable inputs
+  const timeoutMs = clampInt(core.getInput("timeout_ms"), DEFAULT_TIMEOUT_MS, 5000, 600000);
+  const maxTokens = clampInt(core.getInput("max_tokens"), DEFAULT_MAX_TOKENS, 50, 8000);
+  const chunkSizeChars = clampInt(core.getInput("chunk_size_chars"), DEFAULT_CHUNK_SIZE, 1000, 50000);
+  const maxDiffCharsPerFile = clampInt(core.getInput("max_diff_chars_per_file"), DEFAULT_MAX_DIFF_PER_FILE, 1000, 200000);
 
   const ctx = github.context;
   if (!ctx.payload.pull_request) {
@@ -32178,9 +32208,10 @@ async function main() {
 
   core.info(`Starting AI PR Review for PR #${pr.number}`);
   core.info(`Mode: ${reviewMode}, Model: ${model}`);
+  core.info(`Config: timeout=${timeoutMs}ms, max_tokens=${maxTokens}, chunk_size=${chunkSizeChars}, max_diff_per_file=${maxDiffCharsPerFile}`);
 
-  // 1) Fetch PR files
-  const files = [];
+  // 1) Fetch ALL PR files first
+  const allFiles = [];
   let page = 1;
   while (true) {
     const resp = await octokit.rest.pulls.listFiles({
@@ -32189,32 +32220,41 @@ async function main() {
       per_page: 100,
       page
     });
-    files.push(...resp.data);
+    allFiles.push(...resp.data);
     if (resp.data.length < 100) break;
     page++;
   }
 
-  // Filter files with patches (skip binary/large files)
-  const reviewableFiles = files
-    .slice(0, maxFiles)
-    .filter(f => f.patch && f.patch.length > 0);
+  // 2) Filter files with patches FIRST, then slice to max_files
+  const filesWithPatch = allFiles.filter(f => f.patch && f.patch.length > 0);
+  const reviewableFiles = filesWithPatch.slice(0, maxFiles);
 
-  core.info(`Found ${files.length} files, reviewing ${reviewableFiles.length} with patches`);
+  core.info(`Found ${allFiles.length} total files, ${filesWithPatch.length} with patches, reviewing ${reviewableFiles.length}`);
 
   if (reviewableFiles.length === 0) {
     core.info("No reviewable files found (all binary or too large). Skipping.");
     return;
   }
 
-  // 2) Execute review based on mode
+  // 3) Execute review based on mode
   if (reviewMode === "inline") {
-    // Inline mode: review each file separately and post inline comments
     let successCount = 0;
     let skipCount = 0;
 
     for (const file of reviewableFiles) {
       try {
-        const reviewBody = await reviewFile(baseUrlInput, apiKey, model, language, extra, file);
+        const reviewBody = await reviewFile({
+          baseUrl: baseUrlInput,
+          apiKey,
+          model,
+          language,
+          extra,
+          file,
+          chunkSizeChars,
+          maxDiffCharsPerFile,
+          maxTokens,
+          timeoutMs
+        });
 
         if (reviewBody) {
           const posted = await postInlineReview(octokit, repo, pr.number, file, reviewBody, model);
@@ -32231,16 +32271,19 @@ async function main() {
     core.info(`Inline review complete: ${successCount} comments posted, ${skipCount} files skipped`);
 
   } else {
-    // Summary mode: single PR comment with all files (original behavior)
+    // Summary mode
     const filesSummary = reviewableFiles
       .map(f => `- ${f.filename} (+${f.additions}/-${f.deletions})`)
       .join("\n");
 
-    // Build combined diff
+    // Build combined diff with per-file trimming
     const diffParts = [];
     let totalChars = 0;
     for (const f of reviewableFiles) {
-      const fileDiff = `--- a/${f.filename}\n+++ b/${f.filename}\n${f.patch}\n`;
+      // Trim each file's diff before adding
+      const trimmedPatch = trimDiff(f.patch, maxDiffCharsPerFile);
+      const fileDiff = `--- a/${f.filename}\n+++ b/${f.filename}\n${trimmedPatch}\n`;
+
       if (totalChars + fileDiff.length > maxChars) {
         diffParts.push(`...[${reviewableFiles.length - diffParts.length} more files truncated]\n`);
         break;
@@ -32260,7 +32303,15 @@ async function main() {
     }
 
     // Call LLM
-    const content = await callLLM(baseUrlInput, apiKey, model, SYSTEM_PROMPT, prompt);
+    const content = await callLLM({
+      baseUrl: baseUrlInput,
+      apiKey,
+      model,
+      systemPrompt: SYSTEM_PROMPT,
+      userPrompt: prompt,
+      maxTokens,
+      timeoutMs
+    });
 
     if (!content) throw new Error("Model returned empty response");
 

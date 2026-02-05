@@ -39,6 +39,22 @@ inputs:
     description: "Review mode: 'summary' for single PR comment, 'inline' for per-file inline comments"
     required: false
     default: "summary"
+  timeout_ms:
+    description: "Request timeout in milliseconds for LLM calls"
+    required: false
+    default: "60000"
+  max_tokens:
+    description: "Max output tokens for LLM response"
+    required: false
+    default: "1024"
+  chunk_size_chars:
+    description: "Chunk size (chars) for splitting large diffs"
+    required: false
+    default: "12000"
+  max_diff_chars_per_file:
+    description: "Max diff chars per file before trimming"
+    required: false
+    default: "50000"
 runs:
   using: "node20"
   main: "dist/index.js"
